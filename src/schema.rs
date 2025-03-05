@@ -7,5 +7,7 @@ diesel::table! {
         username -> Varchar,
         email -> Text,
         name -> Text,
+        password -> Text,
+        image_profile -> Nullable<Text>,
     }
 }
