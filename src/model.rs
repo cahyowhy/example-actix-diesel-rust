@@ -1,7 +1,10 @@
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::SaltString;
-use argon2::{PasswordHasher,PasswordVerifier};
+use argon2::{PasswordHasher, PasswordVerifier};
 use diesel::prelude::*;
+use jsonwebtoken::encode;
+use once_cell::sync::Lazy;
+use rand::distr::{SampleString, Alphanumeric};
 use serde::Deserialize;
 use serde::Serialize;
 use validator::Validate;
@@ -11,7 +14,9 @@ pub const MSG_REGISTER_SUCCEED: &str = "Register Succeed";
 fn hash_password(password: &str) -> String {
     let arg2 = argon2::Argon2::default();
     let salt = SaltString::generate(&mut OsRng);
-    let password_hash = arg2.hash_password(password.as_bytes(), &salt).expect("hash failed");
+    let password_hash = arg2
+        .hash_password(password.as_bytes(), &salt)
+        .expect("hash failed");
     return password_hash.to_string();
 }
 
@@ -25,6 +30,32 @@ pub struct Pagination {
 pub struct MessageResponse<'a> {
     pub message: &'a str,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct Claims {
+    pub email: String,
+    pub exp: usize,
+}
+
+pub struct Keys {
+    encoding: jsonwebtoken::EncodingKey,
+    pub decoding: jsonwebtoken::DecodingKey,
+}
+
+impl Keys {
+    fn new(secret: &[u8]) -> Self {
+        Self {
+            encoding: jsonwebtoken::EncodingKey::from_secret(secret),
+            decoding: jsonwebtoken::DecodingKey::from_secret(secret),
+        }
+    }
+}
+
+pub static KEYS: Lazy<Keys> = Lazy::new(|| {
+    let alph = Alphanumeric::default();
+    let secret = Alphanumeric::sample_string( &alph,&mut rand::rng(), 60);
+    Keys::new(secret.as_bytes())
+});
 
 #[derive(Queryable, Selectable, Serialize)]
 #[diesel(table_name = crate::schema::users)]
@@ -55,6 +86,37 @@ impl User {
         arg2.verify_password(actual_pass.as_bytes(), &parsed_hash)
             .is_ok()
     }
+
+    pub fn get_claim_jwt(&self) -> LoginUserResponse {
+        let exp = (chrono::Utc::now().naive_utc() + chrono::Duration::hours(3))
+            .and_utc()
+            .timestamp() as usize;
+        let claims = Claims {
+            email: self.email.clone(),
+            exp,
+        };
+        let token = encode(&jsonwebtoken::Header::default(), &claims, &KEYS.encoding)
+            .expect("failed encode token");
+        let image_profile = self.image_profile.as_ref().map(|s| s.clone());
+        LoginUserResponse{
+            id: self.id,
+            email: self.email.clone(),
+            username: self.username.clone(),
+            name: self.name.clone(),
+            token: token,
+            image_profile: image_profile
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct LoginUserResponse {
+    pub id: i32,
+    pub username:String,
+    pub email:String,
+    pub name:String,
+    pub token:String,
+    pub image_profile: Option<String>,
 }
 
 #[derive(Serialize, Queryable)]

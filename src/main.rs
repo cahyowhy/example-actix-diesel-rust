@@ -1,13 +1,61 @@
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use std::collections::HashMap;
+
+use crate::schema::users::dsl::*;
+use actix_web::{
+    body::MessageBody,
+    dev::{ServiceRequest, ServiceResponse},
+    http::header::Accept,
+    middleware::{from_fn, Next},
+    web::{self, Header, Query},
+    App, Error, HttpMessage, HttpResponse, HttpServer, Responder,
+};
 use diesel::{ExpressionMethods, QueryDsl, RunQueryDsl};
 use dotenv::dotenv;
-use model::MSG_REGISTER_SUCCEED;
+use jsonwebtoken::decode;
+use model::{Claims, MSG_REGISTER_SUCCEED};
 use validator::Validate;
-use crate::schema::users::dsl::*;
 
 mod db;
 mod model;
 pub mod schema;
+
+async fn authenticate_middleware(
+    _: Header<Accept>,
+    _: Query<HashMap<String, String>>,
+    req: ServiceRequest,
+    next: Next<impl MessageBody>,
+) -> Result<ServiceResponse<impl MessageBody>, Error> {
+    if req.path() == "/users/login" {
+        let res = next.call(req).await;
+        return res; 
+    }
+
+    if let Some(auth_header) = req.headers().get("Authorization") {
+        let auth_str = auth_header.to_str().unwrap_or("").replace("Bearer ", "");
+
+        println!("{}", auth_str);
+        let claims = decode::<Claims>(
+            &auth_str,
+            &model::KEYS.decoding,
+            &jsonwebtoken::Validation::default(),
+        );
+        match claims {
+            Ok(dat) => {
+                req.extensions_mut().insert(dat);
+                let res = next.call(req).await;
+                res
+            }
+            Err(err) => Err(actix_web::error::ErrorUnauthorized(format!(
+                "unauthorized {}",
+                err
+            ))),
+        }
+    } else {
+        Err(actix_web::error::ErrorBadRequest(
+            "Authorization header empty",
+        ))
+    }
+}
 
 async fn login_user(
     pool: web::Data<db::Pool>,
@@ -21,10 +69,9 @@ async fn login_user(
 
     match result {
         Ok(fetch_user) => {
-            if fetch_user.verify_password(val.password) { // use &val.password
-                HttpResponse::Ok().json(model::MessageResponse {
-                    message: "Login successful", // Replace with your message
-                })
+            if fetch_user.verify_password(val.password) {
+                // use &val.password
+                HttpResponse::Ok().json(fetch_user.get_claim_jwt())
             } else {
                 HttpResponse::Unauthorized().json(model::MessageResponse {
                     message: "Unauthorized",
@@ -112,6 +159,7 @@ async fn main() -> std::io::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::clone(&db_con))
+            .wrap(from_fn(authenticate_middleware))
             .route("/users", web::post().to(create_user))
             .route("/users", web::get().to(get_users))
             .route("/user/{id}", web::get().to(get_user))
